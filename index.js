@@ -347,36 +347,3 @@ app.listen(PORT, async () => {
   console.log(`LocaMS Baileys server running on port ${PORT}`)
   await restoreSessionsOnBoot()
 })
-```
-
----
-
-Scroll down → click **"Commit changes"** → click **"Commit changes"** again.
-
----
-
-## Step 3 — Create the third and last file
-
-Click **"Add file"** → **"Create new file"**
-
-Name it exactly:
-```
-.gitignore
-```
-
-Paste this inside:
-```
-node_modules/
-sessions/
-.env
-```
-
-Scroll down → **"Commit changes"** → **"Commit changes"**
-
----
-
-You should now have **3 files** in your repository:
-```
-.gitignore
-index.js
-package.json
