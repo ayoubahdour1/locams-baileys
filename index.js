@@ -7,7 +7,13 @@ import { createClient } from '@supabase/supabase-js'
 import express from 'express'
 import qrcode from 'qrcode'
 import cors from 'cors'
-import { rmSync, existsSync, mkdirSync } from 'fs'
+import { 
+  rmSync, 
+  existsSync, 
+  mkdirSync,
+  writeFileSync,
+  readFileSync
+} from 'fs'
 import pino from 'pino'
 
 const app = express()
@@ -22,6 +28,77 @@ const supabase = createClient(
 const sessions = {}
 const logger = pino({ level: 'silent' })
 
+// ─────────────────────────────
+// SAVE AND LOAD SESSION STATE
+// TO DISK SO IT SURVIVES RESTARTS
+// ─────────────────────────────
+
+const STATE_FILE = './sessions/state.json'
+
+function saveStateToDisk() {
+  try {
+    if (!existsSync('./sessions')) {
+      mkdirSync('./sessions', { recursive: true })
+    }
+    const state = Object.entries(sessions).map(
+      ([id, s]) => ({
+        sessionId: id,
+        label: s.label,
+        agencyId: s.agencyId,
+        phone: s.phone,
+        status: s.status
+      })
+    )
+    writeFileSync(STATE_FILE, JSON.stringify(state))
+  } catch (e) {
+    console.log('Could not save state:', e.message)
+  }
+}
+
+function loadStateFromDisk() {
+  try {
+    if (!existsSync(STATE_FILE)) return []
+    const raw = readFileSync(STATE_FILE, 'utf8')
+    return JSON.parse(raw)
+  } catch (e) {
+    return []
+  }
+}
+
+// ─────────────────────────────
+// QR STORE — saved to disk
+// so it survives brief restarts
+// ─────────────────────────────
+
+function saveQRToDisk(sessionId, qrData) {
+  try {
+    const qrFile = `./sessions/${sessionId}_qr.txt`
+    writeFileSync(qrFile, qrData)
+  } catch (e) {}
+}
+
+function loadQRFromDisk(sessionId) {
+  try {
+    const qrFile = `./sessions/${sessionId}_qr.txt`
+    if (existsSync(qrFile)) {
+      return readFileSync(qrFile, 'utf8')
+    }
+  } catch (e) {}
+  return null
+}
+
+function deleteQRFromDisk(sessionId) {
+  try {
+    const qrFile = `./sessions/${sessionId}_qr.txt`
+    if (existsSync(qrFile)) {
+      rmSync(qrFile)
+    }
+  } catch (e) {}
+}
+
+// ─────────────────────────────
+// CREATE OR RESTORE A SESSION
+// ─────────────────────────────
 async function startSession(sessionId, label, agencyId) {
 
   const authFolder = `./sessions/${sessionId}`
@@ -47,9 +124,11 @@ async function startSession(sessionId, label, agencyId) {
     label,
     agencyId,
     status: 'connecting',
-    qr: null,
+    qr: loadQRFromDisk(sessionId),
     phone: null
   }
+
+  saveStateToDisk()
 
   sock.ev.on('connection.update', async ({
     qr, connection, lastDisconnect
@@ -59,6 +138,9 @@ async function startSession(sessionId, label, agencyId) {
       const qrImage = await qrcode.toDataURL(qr)
       sessions[sessionId].qr = qrImage
       sessions[sessionId].status = 'waiting'
+      
+      saveQRToDisk(sessionId, qrImage)
+      saveStateToDisk()
 
       await supabase
         .from('whatsapp_sessions')
@@ -67,6 +149,8 @@ async function startSession(sessionId, label, agencyId) {
           updated_at: new Date().toISOString()
         })
         .eq('session_id', sessionId)
+
+      console.log(`QR generated for: ${label}`)
     }
 
     if (connection === 'open') {
@@ -74,6 +158,9 @@ async function startSession(sessionId, label, agencyId) {
       sessions[sessionId].qr = null
       sessions[sessionId].phone =
         sock.user?.id?.split(':')[0] || null
+
+      deleteQRFromDisk(sessionId)
+      saveStateToDisk()
 
       await supabase
         .from('whatsapp_sessions')
@@ -84,7 +171,7 @@ async function startSession(sessionId, label, agencyId) {
         })
         .eq('session_id', sessionId)
 
-      console.log(`Session connected: ${label}`)
+      console.log(`Connected: ${label}`)
     }
 
     if (connection === 'close') {
@@ -95,6 +182,7 @@ async function startSession(sessionId, label, agencyId) {
         code === DisconnectReason.loggedOut
 
       sessions[sessionId].status = 'disconnected'
+      saveStateToDisk()
 
       await supabase
         .from('whatsapp_sessions')
@@ -109,8 +197,12 @@ async function startSession(sessionId, label, agencyId) {
           recursive: true,
           force: true
         })
+        deleteQRFromDisk(sessionId)
         delete sessions[sessionId]
+        saveStateToDisk()
+        console.log(`Logged out: ${label}`)
       } else {
+        console.log(`Reconnecting: ${label}`)
         setTimeout(() => {
           startSession(sessionId, label, agencyId)
         }, 5000)
@@ -155,6 +247,10 @@ async function startSession(sessionId, label, agencyId) {
   })
 }
 
+// ─────────────────────────────
+// API ROUTES
+// ─────────────────────────────
+
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
@@ -185,32 +281,45 @@ app.post('/api/sessions/create', async (req, res) => {
   }
 
   if (sessions[sessionId]) {
+    console.log(`Session already exists: ${sessionId}`)
     return res.json({
       success: true,
       message: 'Session already exists'
     })
   }
 
-  await startSession(sessionId, label, agencyId)
+  console.log(`Creating new session: ${label} (${sessionId})`)
+  startSession(sessionId, label, agencyId)
 
   res.json({
     success: true,
     sessionId,
-    message: 'Session created, QR will be ready shortly'
+    message: 'Session created, QR generating...'
   })
 })
 
 app.get('/api/sessions/:id/qr', (req, res) => {
-  const session = sessions[req.params.id]
+  const sessionId = req.params.id
+  const session = sessions[sessionId]
 
   if (!session) {
+    const savedQR = loadQRFromDisk(sessionId)
+    if (savedQR) {
+      return res.json({
+        qr: savedQR,
+        status: 'waiting',
+        phone: null
+      })
+    }
     return res.status(404).json({
       error: 'Session not found'
     })
   }
 
+  const qr = session.qr || loadQRFromDisk(sessionId)
+
   res.json({
-    qr: session.qr,
+    qr: qr,
     status: session.status,
     phone: session.phone
   })
@@ -231,19 +340,23 @@ app.get('/api/sessions/:id/status', (req, res) => {
 })
 
 app.delete('/api/sessions/:id', async (req, res) => {
-  const session = sessions[req.params.id]
+  const sessionId = req.params.id
+  const session = sessions[sessionId]
 
   if (session?.sock) {
     try {
       await session.sock.logout()
     } catch (e) {}
-    delete sessions[req.params.id]
+    delete sessions[sessionId]
   }
+
+  deleteQRFromDisk(sessionId)
+  saveStateToDisk()
 
   await supabase
     .from('whatsapp_sessions')
     .update({ status: 'disconnected' })
-    .eq('session_id', req.params.id)
+    .eq('session_id', sessionId)
 
   res.json({ success: true })
 })
@@ -321,7 +434,27 @@ app.get('/api/sessions/:id/conversations',
   res.json(Object.values(conversations))
 })
 
+// ─────────────────────────────
+// RESTORE SESSIONS ON BOOT
+// ─────────────────────────────
 async function restoreSessionsOnBoot() {
+  console.log('Restoring sessions from disk...')
+
+  const savedState = loadStateFromDisk()
+
+  if (savedState.length > 0) {
+    for (const s of savedState) {
+      const authFolder = `./sessions/${s.sessionId}`
+      if (existsSync(authFolder)) {
+        console.log(`Restoring: ${s.label}`)
+        await startSession(s.sessionId, s.label, s.agencyId)
+        await new Promise(r => setTimeout(r, 2000))
+      }
+    }
+    console.log('Sessions restored from disk')
+    return
+  }
+
   const { data, error } = await supabase
     .from('whatsapp_sessions')
     .select('*')
@@ -331,6 +464,7 @@ async function restoreSessionsOnBoot() {
   for (const session of data || []) {
     const authFolder = `./sessions/${session.session_id}`
     if (existsSync(authFolder)) {
+      console.log(`Restoring from Supabase: ${session.label}`)
       await startSession(
         session.session_id,
         session.label,
@@ -341,9 +475,21 @@ async function restoreSessionsOnBoot() {
   }
 }
 
+// ─────────────────────────────
+// START SERVER
+// ─────────────────────────────
 const PORT = process.env.PORT || 3001
 
 app.listen(PORT, async () => {
   console.log(`LocaMS Baileys server running on port ${PORT}`)
   await restoreSessionsOnBoot()
 })
+```
+
+---
+
+Scroll down → **"Commit changes"** → **"Commit changes"**
+
+Wait for Railway to redeploy — watch the Deploy Logs until you see:
+```
+LocaMS Baileys server running on port 3001
