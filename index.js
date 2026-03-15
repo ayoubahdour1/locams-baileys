@@ -1,8 +1,10 @@
-import makeWASocket, {
+import pkg from '@whiskeysockets/baileys'
+const {
+  default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion
-} from '@whiskeysockets/baileys'
+} = pkg
 import { createClient } from '@supabase/supabase-js'
 import express from 'express'
 import qrcode from 'qrcode'
