@@ -7,9 +7,9 @@ import { createClient } from '@supabase/supabase-js'
 import express from 'express'
 import qrcode from 'qrcode'
 import cors from 'cors'
-import { 
-  rmSync, 
-  existsSync, 
+import {
+  rmSync,
+  existsSync,
   mkdirSync,
   writeFileSync,
   readFileSync
@@ -27,11 +27,6 @@ const supabase = createClient(
 
 const sessions = {}
 const logger = pino({ level: 'silent' })
-
-// ─────────────────────────────
-// SAVE AND LOAD SESSION STATE
-// TO DISK SO IT SURVIVES RESTARTS
-// ─────────────────────────────
 
 const STATE_FILE = './sessions/state.json'
 
@@ -65,11 +60,6 @@ function loadStateFromDisk() {
   }
 }
 
-// ─────────────────────────────
-// QR STORE — saved to disk
-// so it survives brief restarts
-// ─────────────────────────────
-
 function saveQRToDisk(sessionId, qrData) {
   try {
     const qrFile = `./sessions/${sessionId}_qr.txt`
@@ -96,11 +86,7 @@ function deleteQRFromDisk(sessionId) {
   } catch (e) {}
 }
 
-// ─────────────────────────────
-// CREATE OR RESTORE A SESSION
-// ─────────────────────────────
 async function startSession(sessionId, label, agencyId) {
-
   const authFolder = `./sessions/${sessionId}`
   if (!existsSync(authFolder)) {
     mkdirSync(authFolder, { recursive: true })
@@ -133,12 +119,10 @@ async function startSession(sessionId, label, agencyId) {
   sock.ev.on('connection.update', async ({
     qr, connection, lastDisconnect
   }) => {
-
     if (qr) {
       const qrImage = await qrcode.toDataURL(qr)
       sessions[sessionId].qr = qrImage
       sessions[sessionId].status = 'waiting'
-      
       saveQRToDisk(sessionId, qrImage)
       saveStateToDisk()
 
@@ -150,7 +134,7 @@ async function startSession(sessionId, label, agencyId) {
         })
         .eq('session_id', sessionId)
 
-      console.log(`QR generated for: ${label}`)
+      console.log('QR ready for:', label)
     }
 
     if (connection === 'open') {
@@ -171,7 +155,7 @@ async function startSession(sessionId, label, agencyId) {
         })
         .eq('session_id', sessionId)
 
-      console.log(`Connected: ${label}`)
+      console.log('Connected:', label)
     }
 
     if (connection === 'close') {
@@ -200,9 +184,9 @@ async function startSession(sessionId, label, agencyId) {
         deleteQRFromDisk(sessionId)
         delete sessions[sessionId]
         saveStateToDisk()
-        console.log(`Logged out: ${label}`)
+        console.log('Logged out:', label)
       } else {
-        console.log(`Reconnecting: ${label}`)
+        console.log('Reconnecting:', label)
         setTimeout(() => {
           startSession(sessionId, label, agencyId)
         }, 5000)
@@ -214,7 +198,6 @@ async function startSession(sessionId, label, agencyId) {
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
-
       if (!msg.message) continue
       if (msg.key.remoteJid === 'status@broadcast') continue
 
@@ -229,16 +212,14 @@ async function startSession(sessionId, label, agencyId) {
       const contactNumber =
         msg.key.remoteJid?.replace('@s.whatsapp.net', '')
 
-      const isFromMe = msg.key.fromMe
-
       await supabase.from('messages').insert({
         agency_id: agencyId,
         session_id: sessionId,
         contact_number: contactNumber,
         body: body,
-        direction: isFromMe ? 'out' : 'in',
+        direction: msg.key.fromMe ? 'out' : 'in',
         ai_generated: false,
-        read: isFromMe,
+        read: msg.key.fromMe,
         timestamp: new Date(
           Number(msg.messageTimestamp) * 1000
         ).toISOString()
@@ -246,10 +227,6 @@ async function startSession(sessionId, label, agencyId) {
     }
   })
 }
-
-// ─────────────────────────────
-// API ROUTES
-// ─────────────────────────────
 
 app.get('/api/status', (req, res) => {
   res.json({
@@ -281,20 +258,19 @@ app.post('/api/sessions/create', async (req, res) => {
   }
 
   if (sessions[sessionId]) {
-    console.log(`Session already exists: ${sessionId}`)
     return res.json({
       success: true,
       message: 'Session already exists'
     })
   }
 
-  console.log(`Creating new session: ${label} (${sessionId})`)
+  console.log('Creating session:', label, sessionId)
   startSession(sessionId, label, agencyId)
 
   res.json({
     success: true,
     sessionId,
-    message: 'Session created, QR generating...'
+    message: 'Session created'
   })
 })
 
@@ -387,7 +363,6 @@ app.post('/api/sessions/:id/send', async (req, res) => {
     })
 
     res.json({ success: true })
-
   } catch (error) {
     res.status(500).json({
       error: 'Failed to send message',
@@ -398,7 +373,6 @@ app.post('/api/sessions/:id/send', async (req, res) => {
 
 app.get('/api/sessions/:id/conversations',
   async (req, res) => {
-
   const { data, error } = await supabase
     .from('messages')
     .select('*')
@@ -413,7 +387,6 @@ app.get('/api/sessions/:id/conversations',
 
   for (const msg of data || []) {
     const num = msg.contact_number
-
     if (!conversations[num]) {
       conversations[num] = {
         contact_number: num,
@@ -423,22 +396,17 @@ app.get('/api/sessions/:id/conversations',
         messages: []
       }
     }
-
     if (!msg.read && msg.direction === 'in') {
       conversations[num].unread_count++
     }
-
     conversations[num].messages.push(msg)
   }
 
   res.json(Object.values(conversations))
 })
 
-// ─────────────────────────────
-// RESTORE SESSIONS ON BOOT
-// ─────────────────────────────
 async function restoreSessionsOnBoot() {
-  console.log('Restoring sessions from disk...')
+  console.log('Restoring sessions...')
 
   const savedState = loadStateFromDisk()
 
@@ -446,12 +414,11 @@ async function restoreSessionsOnBoot() {
     for (const s of savedState) {
       const authFolder = `./sessions/${s.sessionId}`
       if (existsSync(authFolder)) {
-        console.log(`Restoring: ${s.label}`)
+        console.log('Restoring:', s.label)
         await startSession(s.sessionId, s.label, s.agencyId)
         await new Promise(r => setTimeout(r, 2000))
       }
     }
-    console.log('Sessions restored from disk')
     return
   }
 
@@ -464,7 +431,7 @@ async function restoreSessionsOnBoot() {
   for (const session of data || []) {
     const authFolder = `./sessions/${session.session_id}`
     if (existsSync(authFolder)) {
-      console.log(`Restoring from Supabase: ${session.label}`)
+      console.log('Restoring from Supabase:', session.label)
       await startSession(
         session.session_id,
         session.label,
@@ -475,21 +442,9 @@ async function restoreSessionsOnBoot() {
   }
 }
 
-// ─────────────────────────────
-// START SERVER
-// ─────────────────────────────
 const PORT = process.env.PORT || 3001
 
 app.listen(PORT, async () => {
-  console.log(`LocaMS Baileys server running on port ${PORT}`)
+  console.log('Server started on port', PORT)
   await restoreSessionsOnBoot()
 })
-```
-
----
-
-Scroll down → **"Commit changes"** → **"Commit changes"**
-
-Wait for Railway to redeploy — watch the Deploy Logs until you see:
-```
-LocaMS Baileys server running on port 3001
